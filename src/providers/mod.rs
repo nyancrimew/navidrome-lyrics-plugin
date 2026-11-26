@@ -16,8 +16,8 @@ mod http;
 mod registry;
 mod services;
 
-pub use registry::ProviderRegistry;
 use crate::providers::services::Deezer;
+pub use registry::ProviderRegistry;
 
 const USER_AGENT: &str = concat!(
     "navidrome-lyrics-plugin/",
@@ -48,6 +48,14 @@ pub fn register_providers(registry: &mut ProviderRegistry) {
 pub struct ProviderLyrics {
     pub lyrics: Lyrics,
     pub tracks: Vec<LyricsTrack>,
+}
+
+/// Extra track info obtained via matcher.
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct ExtraTrackInfo {
+    pub isrc: Option<String>,
+    pub barcode: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -88,6 +96,7 @@ pub trait LyricsProvider {
     fn fetch_lyrics(
         &self,
         track: &TrackInfo,
+        extra: &ExtraTrackInfo,
         cfg: &PluginConfig,
     ) -> ProviderResult<Option<ProviderLyrics>>;
 

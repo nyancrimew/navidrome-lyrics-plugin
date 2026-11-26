@@ -2,10 +2,14 @@ use crate::cache::{CacheLookup, LyricsCache};
 use crate::config::PluginConfig;
 use crate::ext::TrackInfoExt;
 use crate::fetch::{self, Outcome};
+use crate::providers::ExtraTrackInfo;
 use crate::types::{Lyrics, LyricsKind};
 use crate::writing;
 use extism_pdk::{debug, info, warn};
+use nd_pdk::host;
+use nd_pdk::host::matcher::MatchOptions;
 use nd_pdk::lyrics::{Error as LyricsError, GetLyricsResponse, TrackInfo};
+use nd_pdk::types::SongRef;
 use std::rc::Rc;
 
 pub fn get_lyrics(track: TrackInfo) -> Result<GetLyricsResponse, LyricsError> {
@@ -38,7 +42,8 @@ fn fetch_fresh(
     cfg: &PluginConfig,
     cache: Option<&LyricsCache>,
 ) -> Result<Lyrics, LyricsError> {
-    match fetch::run(track, cfg, cache) {
+    let extra = fetch_extra_info(track)?;
+    match fetch::run(track, &extra, cfg, cache) {
         Outcome::Found(lyrics) => Ok(lyrics),
         Outcome::NotFound => Err(LyricsError::new(format!(
             "no lyrics found for '{}' from any provider",
@@ -49,6 +54,31 @@ fn fetch_fresh(
             track.label()
         ))),
     }
+}
+
+fn fetch_extra_info(track: &TrackInfo) -> Result<ExtraTrackInfo, LyricsError> {
+    let search = vec![SongRef {
+        id: track.clone().id,
+        ..Default::default()
+    }];
+    let tracks = host::matcher::match_songs(search, MatchOptions::default()).map_err(|e| {
+        LyricsError::new(format!(
+            "failed to fetch extra info for '{}': {e}",
+            track.label()
+        ))
+    })?;
+    if !tracks.is_empty() {
+        if let Some(Some(matched_track)) = tracks.first() {
+            let isrc = matched_track.tags.get("isrc").and_then(|f| f.first());
+            let barcode = matched_track.tags.get("barcode").and_then(|f| f.first());
+
+            return Ok(ExtraTrackInfo {
+                isrc: isrc.cloned(),
+                barcode: barcode.cloned(),
+            });
+        }
+    }
+    Ok(Default::default())
 }
 
 fn cache_lookup(cache: Option<&LyricsCache>, track: &TrackInfo) -> Option<Lyrics> {

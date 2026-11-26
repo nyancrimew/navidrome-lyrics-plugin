@@ -6,7 +6,7 @@ use crate::ext::TrackInfoExt;
 use crate::format::elrc;
 use crate::providers::error::{ProviderError, ProviderResult};
 use crate::providers::http::Http;
-use crate::providers::{LyricsProvider, ProviderLyrics};
+use crate::providers::{ExtraTrackInfo, LyricsProvider, ProviderLyrics};
 use crate::types::{Lyrics, LyricsKind, Word};
 use extism_pdk::info;
 use nd_pdk::{host::cache, lyrics::TrackInfo};
@@ -79,6 +79,11 @@ impl DeezerError {
 struct DeezerSearchResponse {
     error: Option<DeezerError>,
     data: Vec<DeezerTrack>,
+}
+
+#[derive(Deserialize, Debug)]
+struct DeezerErrorResponse {
+    error: Option<DeezerError>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +180,35 @@ impl Deezer {
                 .filter(|s| *s != "none")
                 .map(str::to_string),
         })
+    }
+
+    fn by_isrc(&self, isrc: &str) -> ProviderResult<Option<DeezerTrack>> {
+        let response = Http::get(format!("{API_URL}/track/isrc:{isrc}"))
+            .browser()
+            .send()?;
+
+        match response.status {
+            200 => {
+                // not found (and other errors) result in a status 200 but a completely different
+                // JSON format, so we need to parse it differently. why would anyone design an api like this.
+                let parsed: ProviderResult<DeezerTrack> = response.json("the track");
+                if let Ok(parsed) = parsed {
+                    return Ok(Some(parsed));
+                } else {
+                    let error: DeezerErrorResponse = response.json("the error")?;
+                    if let Some(actual_error) = error.error {
+                        return if actual_error.is_no_data() {
+                            Ok(None)
+                        } else {
+                            Err(ProviderError::from(actual_error))
+                        };
+                    }
+                }
+                Ok(None)
+            }
+            403 | 429 => Err(response.rate_limited()),
+            _ => Err(response.unexpected_status("the isrc lookup")),
+        }
     }
 
     fn search(&self, query: String) -> ProviderResult<Vec<DeezerTrack>> {
@@ -278,6 +312,7 @@ impl LyricsProvider for Deezer {
     fn fetch_lyrics(
         &self,
         track: &TrackInfo,
+        extra: &ExtraTrackInfo,
         cfg: &PluginConfig,
     ) -> ProviderResult<Option<ProviderLyrics>> {
         if !track.has_artist() {
@@ -290,17 +325,24 @@ impl LyricsProvider for Deezer {
             track.title
         );
 
-        let search_results = self.search(query)?;
-        let result = search_results
-            .iter()
-            .filter(|t| {
+        let song_id = if let Some(isrc) = extra.isrc.as_deref()
+            && let Some(result) = self.by_isrc(isrc)?.filter(|t| {
                 track.matches_duration(Duration::from_secs(t.duration), cfg.duration_tolerance)
-            })
-            .filter(|t| !cfg.require_album_match || track.matches_album(&t.album.title))
-            .min_by_key(|t| Duration::from_secs(t.duration).abs_diff(track.duration()));
-        let song_id = match result {
-            Some(result) => result.id,
-            None => return Ok(None),
+            }) {
+            result.id
+        } else {
+            let search_results = self.search(query)?;
+            let result = search_results
+                .iter()
+                .filter(|t| {
+                    track.matches_duration(Duration::from_secs(t.duration), cfg.duration_tolerance)
+                })
+                .filter(|t| !cfg.require_album_match || track.matches_album(&t.album.title))
+                .min_by_key(|t| Duration::from_secs(t.duration).abs_diff(track.duration()));
+            match result {
+                Some(result) => result.id,
+                None => return Ok(None),
+            }
         };
 
         let attempt = |force_refresh: bool| -> Result<Option<ProviderLyrics>, LookupError> {
